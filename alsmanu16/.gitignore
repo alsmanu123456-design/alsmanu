@@ -1,0 +1,8 @@
+node_modules/
+wa-sessions/
+test_out/
+*.log
+config.json
+bot-data/
+.env
+bin/yt-dlp
