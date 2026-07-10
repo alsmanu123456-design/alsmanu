@@ -70,7 +70,9 @@ export async function handleCallback(bot, query) {
   // [REMOVED] قسم إدارة الأرقام حُذف بطلب المستخدم — أي زر قديم يعيد للقائمة الرئيسية
   if (data === 'menu_numbers' || data.startsWith('nummgr_') || data.startsWith('num_')) {
     await bot.answerCallbackQuery(query.id, { text: 'هذا القسم لم يعد متاحاً' }).catch(() => {});
-    if (_deps.sendMainMenu) await _deps.sendMainMenu(bot, chatId, userId).catch(() => {});
+    await bot.sendMessage(chatId, 'تم حذف قسم إدارة الأرقام.\n\nيمكنك إدارة أرقامك من قسم "ربط واتساب".', {
+      reply_markup: { inline_keyboard: [[{ text: '\u{1F3E0} \u0627\u0644\u0631\u0626\u064A\u0633\u064A\u0629', callback_data: 'home' }]] },
+    }).catch(() => {});
     return true;
   }
 
