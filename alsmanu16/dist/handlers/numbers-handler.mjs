@@ -67,10 +67,10 @@ export async function handleCallback(bot, query) {
   const chatId = query.message?.chat.id;
   const userId = String(query.from.id);
 
+  // [REMOVED] قسم إدارة الأرقام حُذف بطلب المستخدم — أي زر قديم يعيد للقائمة الرئيسية
   if (data === 'menu_numbers' || data.startsWith('nummgr_') || data.startsWith('num_')) {
-    const handled = await _deps.handleNumbersCallback(bot, chatId, userId, data);
-    if (handled) return true;
-    await _deps.handleNumberCallback(bot, chatId, userId, data);
+    await bot.answerCallbackQuery(query.id, { text: 'هذا القسم لم يعد متاحاً' }).catch(() => {});
+    if (_deps.sendMainMenu) await _deps.sendMainMenu(bot, chatId, userId).catch(() => {});
     return true;
   }
 
