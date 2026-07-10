@@ -40,7 +40,8 @@ export async function handleCallback(bot, query) {
   const chatId = query.message?.chat.id;
   const userId = String(query.from.id);
 
-  if (data === 'menu_connect' || data.startsWith('connect_') || data.startsWith('disconnect_')) {
+  // [FIX-NUMPICK] numsel_/numpage_ أزرار قائمة الأرقام في /start لم تكن موجّهة لأي معالج
+  if (data === 'menu_connect' || data.startsWith('connect_') || data.startsWith('disconnect_') || data.startsWith('numsel_') || data.startsWith('numpage_')) {
     await _deps.handleLinkingCallback(bot, chatId, userId, data);
     return true;
   }

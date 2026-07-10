@@ -90,13 +90,16 @@ export async function handleCallback(bot, query) {
       // التحقق: الرقم المختار يجب أن يكون في قائمة أرقام المستخدم الفعلية
       const validNums = (user.whatsappNumbers || []).map(n => n.number);
       if (!validNums.includes(picked)) {
-        await bot.answerCallbackQuery(query.id, { text: '❌ رقم غير صالح' });
+        // [FIX-NUMBPICK] الكولباك مُجاب مسبقاً في callback-handler — يجب عدم رمي خطأ هنا
+        await bot.answerCallbackQuery(query.id, { text: '❌ رقم غير صالح' }).catch(() => {});
+        await bot.sendMessage(chatId, '❌ رقم غير صالح').catch(() => {});
         return true;
       }
       setActiveNumber(userId, picked);
-      await bot.answerCallbackQuery(query.id, { text: `✅ تم اختيار ${picked}` });
+      await bot.answerCallbackQuery(query.id, { text: `✅ تم اختيار ${picked}` }).catch(() => {});
+      await bot.sendMessage(chatId, `✅ تم اختيار الرقم ${picked} كرقم نشط`).catch(() => {});
     } else {
-      await bot.answerCallbackQuery(query.id, { text: '🏠 تخطي — ستعمل بدون اختيار رقم' });
+      await bot.answerCallbackQuery(query.id, { text: '🏠 تخطي — ستعمل بدون اختيار رقم' }).catch(() => {});
     }
     const freshUser = _deps.getUser(userId);
     _deps.clearState(userId);

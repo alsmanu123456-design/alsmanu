@@ -1,5 +1,235 @@
+
+// [SCHED-FIX-V2] العثور على أي سوكت متصل للمستخدم — يدعم مفاتيح الأرقام المتعددة userId_+phone
+function _findSock(inMemoryDB, userId) {
+  if (!inMemoryDB?.sessions) return null;
+  const direct = inMemoryDB.sessions.get(userId) || inMemoryDB.sessions.get(`sess_${userId}`);
+  if (direct) return direct;
+  for (const [k, v] of inMemoryDB.sessions.entries()) {
+    if (String(k).startsWith(`${userId}_`) && v) return v;
+  }
+  return null;
+}
+
 let _deps = {};
-export function setDeps(d) { _deps = d; }
+export function setDeps(d) { _deps = { ..._deps, ...d }; }
+
+// ─── [SCHED-FIX] معالج النصوص للجدولة (كان مفقوداً تماماً) ───────────────
+// الحالات: awaiting_schedule_target → awaiting_schedule_time → awaiting_schedule_message
+//          awaiting_recurring_recipient → awaiting_recurring_interval → awaiting_recurring_message
+export function isScheduleState(state) {
+  return typeof state === "string" && (state.startsWith("awaiting_schedule_") || state.startsWith("awaiting_recurring_"));
+}
+
+function _normJid(input) {
+  const raw = String(input || "").trim().replace(/[+\s-]/g, "");
+  if (!/^\d{6,20}$/.test(raw)) return null;
+  // معرّفات المجموعات تبدأ عادة بـ 120 وطولها كبير
+  if (raw.startsWith("120") && raw.length >= 15) return `${raw}@g.us`;
+  return `${raw}@s.whatsapp.net`;
+}
+
+function _parseTime(text) {
+  const t = String(text || "").trim();
+  // صيغة: بعد X دقيقة/ساعة  مثال: 30m أو 2h أو "30" (دقائق)
+  let m = t.match(/^(\d{1,4})\s*([mhdmد سي]?)/i);
+  const now = Date.now();
+  if (/^\d{1,4}$/.test(t)) return now + parseInt(t, 10) * 60000;
+  m = t.match(/^(\d{1,4})\s*(m|min|د|دقيقة|دقائق)$/i);
+  if (m) return now + parseInt(m[1], 10) * 60000;
+  m = t.match(/^(\d{1,4})\s*(h|hr|س|ساعة|ساعات)$/i);
+  if (m) return now + parseInt(m[1], 10) * 3600000;
+  // صيغة كاملة: YYYY-MM-DD HH:mm أو DD/MM HH:mm (بتوقيت السعودية UTC+3)
+  m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{2})$/);
+  if (m) {
+    const ts = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4] - 3, +m[5]);
+    return ts > now ? ts : null;
+  }
+  m = t.match(/^(\d{1,2})\/(\d{1,2})[ ](\d{1,2}):(\d{2})$/);
+  if (m) {
+    const y = new Date().getFullYear();
+    const ts = Date.UTC(y, +m[2] - 1, +m[1], +m[3] - 3, +m[4]);
+    return ts > now ? ts : null;
+  }
+  // صيغة HH:mm فقط → اليوم أو غداً
+  m = t.match(/^(\d{1,2}):(\d{2})$/);
+  if (m) {
+    const d = new Date();
+    let ts = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), +m[1] - 3, +m[2]);
+    if (ts <= now) ts += 86400000;
+    return ts;
+  }
+  return null;
+}
+
+const _INTERVALS = { "يومي": 86400000, "اسبوعي": 604800000, "أسبوعي": 604800000, "شهري": 2592000000, daily: 86400000, weekly: 604800000, monthly: 2592000000 };
+
+export async function handleScheduleText(bot2, msg) {
+  const { getUser, saveUser, setState, clearState, getState, cancelKeyboard, scheduleMenuKeyboard } = _deps;
+  if (!getState) return false;
+  const userId = String(msg.from?.id || "");
+  const chatId = msg.chat.id;
+  const st = getState(userId);
+  if (!isScheduleState(st.state)) return false;
+  const text = String(msg.text || "").trim();
+  if (text === "إلغاء" || text === "/cancel") {
+    clearState?.(userId);
+    await bot2.sendMessage(chatId, "✅ تم الإلغاء.", { reply_markup: scheduleMenuKeyboard?.() });
+    return true;
+  }
+  const data = st.data || {};
+
+  // ── رسالة مجدولة لمرة واحدة ──
+  if (st.state === "awaiting_schedule_target") {
+    const jid = _normJid(text);
+    if (!jid) {
+      await bot2.sendMessage(chatId, "❌ رقم غير صالح. أدخل الرقم مع كود الدولة، مثال: `966501234567`", { parse_mode: "Markdown", reply_markup: cancelKeyboard?.() });
+      return true;
+    }
+    setState(userId, "awaiting_schedule_time", { ...data, schedJid: jid });
+    await bot2.sendMessage(
+      chatId,
+      "📅 *الخطوة 2⁄3:* متى تريد الإرسال؟\n\nأمثلة:\n• `30` أو `30m` → بعد 30 دقيقة\n• `2h` → بعد ساعتين\n• `21:30` → اليوم/غداً الساعة 21:30 (توقيت السعودية)\n• `2026-07-15 14:00` → تاريخ محدد",
+      { parse_mode: "Markdown", reply_markup: cancelKeyboard?.() }
+    );
+    return true;
+  }
+  if (st.state === "awaiting_schedule_time") {
+    const ts = _parseTime(text);
+    if (!ts) {
+      await bot2.sendMessage(chatId, "❌ صيغة وقت غير صالحة. أمثلة: `30m` أو `2h` أو `21:30` أو `2026-07-15 14:00`", { parse_mode: "Markdown", reply_markup: cancelKeyboard?.() });
+      return true;
+    }
+    setState(userId, "awaiting_schedule_message", { ...data, schedAt: ts });
+    const date = new Date(ts).toLocaleString("ar-SA", { timeZone: "Asia/Riyadh", hour12: false });
+    await bot2.sendMessage(chatId, `📅 *الخطوة 3⁄3:* موعد الإرسال: ${date}\n\nالآن أرسل *نص الرسالة*:`, { parse_mode: "Markdown", reply_markup: cancelKeyboard?.() });
+    return true;
+  }
+  if (st.state === "awaiting_schedule_message") {
+    const user = getUser(userId);
+    const list = user.scheduledMessages || [];
+    const item = {
+      id: `sch_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      jid: data.schedJid,
+      message: text,
+      sendAt: data.schedAt,
+      status: "pending",
+      createdAt: Date.now()
+    };
+    list.push(item);
+    saveUser(userId, { scheduledMessages: list });
+    clearState?.(userId);
+    const date = new Date(item.sendAt).toLocaleString("ar-SA", { timeZone: "Asia/Riyadh", hour12: false });
+    await bot2.sendMessage(chatId, `✅ *تمت الجدولة بنجاح!*\n\n📱 المستلم: +${item.jid.split("@")[0]}\n📅 الموعد: ${date}\n💬 "${text.slice(0, 60)}"`, { parse_mode: "Markdown", reply_markup: scheduleMenuKeyboard?.() });
+    return true;
+  }
+
+  // ── رسالة متكررة ──
+  if (st.state === "awaiting_recurring_recipient") {
+    const jid = _normJid(text);
+    if (!jid) {
+      await bot2.sendMessage(chatId, "❌ رقم غير صالح. أدخل الرقم مع كود الدولة:", { reply_markup: cancelKeyboard?.() });
+      return true;
+    }
+    setState(userId, "awaiting_recurring_interval", { ...data, recJid: jid });
+    await bot2.sendMessage(chatId, "🔁 *الخطوة 2⁄4:* اختر التكرار — أرسل: `يومي` أو `اسبوعي` أو `شهري`", { parse_mode: "Markdown", reply_markup: cancelKeyboard?.() });
+    return true;
+  }
+  if (st.state === "awaiting_recurring_interval") {
+    const iv = _INTERVALS[text.toLowerCase()] || _INTERVALS[text];
+    if (!iv) {
+      await bot2.sendMessage(chatId, "❌ اختر: `يومي` أو `اسبوعي` أو `شهري`", { parse_mode: "Markdown", reply_markup: cancelKeyboard?.() });
+      return true;
+    }
+    setState(userId, "awaiting_recurring_time", { ...data, recInterval: iv });
+    await bot2.sendMessage(chatId, "🔁 *الخطوة 3⁄4:* متى أول إرسال؟ مثال: `21:30` أو `30m`", { parse_mode: "Markdown", reply_markup: cancelKeyboard?.() });
+    return true;
+  }
+  if (st.state === "awaiting_recurring_time") {
+    const ts = _parseTime(text);
+    if (!ts) {
+      await bot2.sendMessage(chatId, "❌ صيغة وقت غير صالحة. مثال: `21:30` أو `2h`", { parse_mode: "Markdown", reply_markup: cancelKeyboard?.() });
+      return true;
+    }
+    setState(userId, "awaiting_recurring_message", { ...data, recAt: ts });
+    await bot2.sendMessage(chatId, "🔁 *الخطوة 4⁄4:* أرسل *نص الرسالة* المتكررة:", { parse_mode: "Markdown", reply_markup: cancelKeyboard?.() });
+    return true;
+  }
+  if (st.state === "awaiting_recurring_message") {
+    const user = getUser(userId);
+    const list = user.scheduledMessages || [];
+    const item = {
+      id: `rec_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      jid: data.recJid,
+      message: text,
+      sendAt: data.recAt,
+      recurring: data.recInterval,
+      status: "pending",
+      createdAt: Date.now()
+    };
+    list.push(item);
+    saveUser(userId, { scheduledMessages: list });
+    clearState?.(userId);
+    const date = new Date(item.sendAt).toLocaleString("ar-SA", { timeZone: "Asia/Riyadh", hour12: false });
+    await bot2.sendMessage(chatId, `✅ *تم إنشاء الرسالة المتكررة!*\n\n📱 المستلم: +${item.jid.split("@")[0]}\n📅 أول إرسال: ${date}`, { parse_mode: "Markdown", reply_markup: scheduleMenuKeyboard?.() });
+    return true;
+  }
+  return false;
+}
+
+// ─── [SCHED-FIX] حلقة الإرسال الفعلية (كانت مفقودة تماماً) ────────────────
+let _loopTimer = null;
+export function startScheduleLoop(bot2) {
+  if (_loopTimer) return;
+  _loopTimer = setInterval(async () => {
+    try {
+      const { getAllUsers, getUser, saveUser, inMemoryDB } = _deps;
+      if (!getAllUsers || !inMemoryDB) return;
+      const now = Date.now();
+      const users = getAllUsers() || {};
+      for (const userId of Object.keys(users)) {
+        const user = getUser(userId);
+        const list = user.scheduledMessages || [];
+        let changed = false;
+        for (const m of list) {
+          if (m.status !== "pending") continue;
+          const ts = typeof m.sendAt === "number" ? m.sendAt : new Date(m.sendAt).getTime();
+          if (!ts || ts > now) continue;
+          const sock = _findSock(inMemoryDB, userId);
+          if (!sock) {
+            // لا يوجد اتصال واتساب — أجّل 5 دقائق بدل الفشل النهائي
+            if (!m._retries) m._retries = 0;
+            m._retries++;
+            if (m._retries > 12) { m.status = "failed"; m.error = "لا يوجد اتصال واتساب"; }
+            else m.sendAt = now + 300000;
+            changed = true;
+            continue;
+          }
+          try {
+            await sock.sendMessage(m.jid, { text: m.message });
+            if (m.recurring) {
+              m.sendAt = ts + m.recurring;
+              m.lastSentAt = now;
+            } else {
+              m.status = "sent";
+              m.sentAt = now;
+            }
+            changed = true;
+            try {
+              if (user.telegramChatId) {
+                await bot2.sendMessage(user.telegramChatId, `✅ تم إرسال رسالتك المجدولة إلى +${(m.jid || "").split("@")[0]}`);
+              }
+            } catch {}
+          } catch (e) {
+            m.status = "failed";
+            m.error = String(e?.message || e).slice(0, 100);
+            changed = true;
+          }
+        }
+        if (changed) saveUser(userId, { scheduledMessages: list });
+      }
+    } catch {}
+  }, 30000);
+}
 
 export async function handleScheduleCallback(bot2, chatId, userId, data) {
   const { getUser, saveUser, setState, inMemoryDB, cancelKeyboard, scheduleMenuKeyboard } = _deps;
@@ -16,7 +246,7 @@ export async function handleScheduleCallback(bot2, chatId, userId, data) {
     return true;
   }
   if (data === "schedule_add") {
-    const sock = inMemoryDB.sessions.get(userId);
+    const sock = _findSock(inMemoryDB, userId);
     if (!sock) {
       await bot2.sendMessage(chatId, "\u274C \u064A\u062C\u0628 \u0631\u0628\u0637 \u0648\u0627\u062A\u0633\u0627\u0628 \u0623\u0648\u0644\u0627\u064B \u0644\u062C\u062F\u0648\u0644\u0629 \u0631\u0633\u0627\u0626\u0644");
       return true;
