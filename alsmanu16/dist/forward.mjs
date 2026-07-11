@@ -72,8 +72,9 @@ export function getConnectedForwardNumbers(uid) {
   return out;
 }
 function _sockForNumber(phoneNumber) {
+  // [USER-ISOLATION] لا fallback لسوكت عام — الرقم المطلوب فقط
   const entry = phoneNumber ? _socksByNumber.get(phoneNumber) : null;
-  return entry?.sock || _sock;
+  return entry?.sock || null;
 }
 // أفضل سوكت متاح لمستخدم معيّن (أول رقم يملكه)
 function _sockForUser(uid) {
@@ -182,13 +183,14 @@ function cs(uid) { SESSION.delete(uid); }
 
 // ─── جلب المجموعات من واتساب ──────────────────────────────────────
 async function fetchGroups(sockOverride) {
-  const sock = sockOverride || _sock;
+  // [USER-ISOLATION] لا fallback لجلسة مستخدم آخر — السوكت يجب أن يُمرَّر صراحةً
+  const sock = sockOverride;
   if (!sock) return [];
   try {
     const groups = await sock.groupFetchAllParticipating();
     return Object.values(groups).map((g) => ({
       id: g.id,
-      name: g.subject || g.id.split("@")[0],
+      name: (g.subject && g.subject.trim()) || ("مجموعة " + g.id.split("@")[0].slice(-6)),
     }));
   } catch { return []; }
 }
@@ -254,7 +256,7 @@ async function _fetchChannelNameFromWeb(inviteCode) {
 
 // ─── مساعد: جلب وعرض معلومات قناة واتساب (newsletter) ─────────────
 async function _fetchAndShowNewsletter(uid, type, key, displayFn) {
-  const sock = _sockForUser(uid) || _sock;
+  const sock = _sockForUser(uid);
   if (!sock) {
     await displayFn("⚠️ *واتساب غير متصل*\n\nاربط رقم واتساب أولاً ثم حاول مجدداً.", {
       inline_keyboard: [[{ text: "🔙 رجوع", callback_data: "fw_chm" }]],
@@ -365,7 +367,7 @@ export async function applyForwardRules(sock, msg) {
         let text = extractMsgText(msg);
         const m = msg.message;
         if (!m) {
-          _fwLog(`⚠️ رسالة بدون محتوى واردة من:\n\`${fromJid}\``);
+          _fwLog(`⚠️ رس��لة بدون محتوى واردة من:\n\`${fromJid}\``);
           continue;
         }
 
@@ -778,7 +780,7 @@ export async function handleForwardCallback(query) {
     if (!result?.id) { ans("⚠️ لا توجد قناة في الجلسة — ابحث أولاً"); return true; }
     const added = addUserChannel(uid, { id: result.id, name: result.name });
     if (!added) { ans("ℹ️ القناة محفوظة مسبقاً"); return true; }
-    const sock = _sockForUser(uid) || _sock;
+    const sock = _sockForUser(uid);
     if (sock?.subscribeNewsletterUpdates) sock.subscribeNewsletterUpdates(result.id).catch(() => {});
     ans("✅ تم الحفظ والاشتراك في تحديثات القناة");
     return true;
@@ -789,7 +791,7 @@ export async function handleForwardCallback(query) {
     ans("⏳ جاري الاشتراك...");
     const result = gs(uid).chSearchResult;
     if (!result?.id) { ans("⚠️ لا توجد قناة في الجلسة"); return true; }
-    const sock = _sockForUser(uid) || _sock;
+    const sock = _sockForUser(uid);
     if (!sock) { ans("⚠️ واتساب غير متصل"); return true; }
     try {
       await sock.newsletterFollow(result.id);
@@ -806,7 +808,7 @@ export async function handleForwardCallback(query) {
     ans("⏳ جاري تنزيل البروفايل الكامل...");
     const result = gs(uid).chSearchResult;
     if (!result?.id) { await send("⚠️ لا توجد قناة في الجلسة"); return true; }
-    const sock = _sockForUser(uid) || _sock;
+    const sock = _sockForUser(uid);
     if (!sock) { await send("⚠️ واتساب غير متصل"); return true; }
     let _meta = null;
     try {
@@ -1316,7 +1318,7 @@ export async function handleForwardText(msg) {
   // ── إضافة قناة يدوياً ────────────────────────────────────────
   if (sess.step === "add_ch_jid") {
     const input = text.trim();
-    const sock = _sockForUser(uid) || _sock;
+    const sock = _sockForUser(uid);
     if (input.includes("whatsapp.com/channel/")) {
       const match = input.match(/channel\/([A-Za-z0-9_\-]+)/);
       if (!match) { await send("⚠️ رابط غير صالح — تأكد من نسخ الرابط كاملاً"); return true; }
@@ -1437,6 +1439,49 @@ export async function handleForwardText(msg) {
     return true;
   }
 
+  // ── [LINK-AUTO-ADD] رابط قناة مُرسَل في أي وقت → جلب الاسم وإضافتها فوراً ──
+  if (text.includes("whatsapp.com/channel/")) {
+    const match = text.match(/channel\/([A-Za-z0-9_\-]+)/);
+    if (match) {
+      await send("⏳ جاري جلب معلومات القناة...");
+      const sock = _sockForUser(uid);
+      try {
+        let metaId = null, metaName = null;
+        if (sock?.newsletterMetadata) {
+          try {
+            const meta = await sock.newsletterMetadata("invite", match[1]);
+            if (meta?.id) {
+              metaId = meta.id;
+              const _rawName = typeof meta.name === "string" ? meta.name.trim() : null;
+              metaName = (_rawName && !/^\d+$/.test(_rawName)) ? _rawName : null;
+            }
+          } catch {}
+        }
+        if (!metaName) {
+          const webName = await _fetchChannelNameFromWeb(match[1]);
+          if (webName) metaName = webName;
+        }
+        if (!metaId && !metaName) throw new Error("no meta");
+        // بدون sock نحفظ بالاسم من الويب والرابط كمعرف مؤقت يُحدَّث عند الاتصال
+        const id = metaId || ("invite:" + match[1]);
+        const name = metaName || ("📺 " + (metaId ? metaId.split("@")[0] : match[1]));
+        const isNew = addUserChannel(uid, { id, name });
+        if (metaId && sock?.subscribeNewsletterUpdates) {
+          sock.subscribeNewsletterUpdates(metaId).catch(() => {});
+        }
+        await send(
+          isNew
+            ? `✅ *تمت إضافة القناة:*\n\n📺 ${name}\n\nأصبحت متاحة الآن في قوائم التحويل.`
+            : `ℹ️ القناة *${name}* مضافة مسبقاً.`,
+          chMgrKb()
+        );
+      } catch {
+        await send("❌ *تعذّر جلب القناة*\n\nتأكد من:\n• صحة الرابط\n• أن واتساب متصل\n• أن القناة عامة");
+      }
+      return true;
+    }
+  }
+
   return false;
 }
 
@@ -1515,7 +1560,7 @@ export function webGetOverview(uid) {
 // معاينة قناة عبر رابط أو JID — اسم + صورة + مشتركين
 export async function webPreviewChannel(uid, input) {
   uid = String(uid);
-  const sock = _sockForUser(uid) || _sock;
+  const sock = _sockForUser(uid);
   input = String(input || "").trim();
   let type = null, key = null;
   if (input.includes("whatsapp.com/channel/")) {
@@ -1569,7 +1614,7 @@ export function webAddChannel(uid, ch) {
   uid = String(uid);
   if (!ch?.id) throw new Error("بيانات قناة ناقصة");
   const added = addUserChannel(uid, { id: ch.id, name: ch.name || ch.id });
-  const sock = _sockForUser(uid) || _sock;
+  const sock = _sockForUser(uid);
   if (ch.id.endsWith("@newsletter") && sock?.subscribeNewsletterUpdates) {
     sock.subscribeNewsletterUpdates(ch.id).catch(() => {});
   }
@@ -1615,7 +1660,7 @@ export function webCreateRule(uid, payload) {
   rules.push(rule);
   saveRules(rules);
   // اشتراك تلقائي في القنوات المصدر
-  const sock = _sockForUser(uid) || _sock;
+  const sock = _sockForUser(uid);
   if (sock?.subscribeNewsletterUpdates) {
     for (const s of sources) {
       if (s.endsWith("@newsletter")) sock.subscribeNewsletterUpdates(s).catch(() => {});
@@ -1636,7 +1681,7 @@ export function webUpdateRule(uid, ruleId, patch) {
   if (!Array.isArray(rule.sources) || !rule.sources.length) throw new Error("القاعدة تحتاج مصدراً واحداً على الأقل");
   if (!rule.destination) throw new Error("القاعدة تحتاج وجهة");
   saveRules(rules);
-  const sock = _sockForUser(uid) || _sock;
+  const sock = _sockForUser(uid);
   if (sock?.subscribeNewsletterUpdates) {
     for (const s of rule.sources) {
       if (s.endsWith("@newsletter")) sock.subscribeNewsletterUpdates(s).catch(() => {});
@@ -1657,7 +1702,7 @@ export function webDeleteRule(uid, ruleId) {
 
 // صورة مجموعة/قناة محفوظة (للويب آب)
 export async function webChatPicture(uid, jid) {
-  const sock = _sockForUser(String(uid)) || _sock;
+  const sock = _sockForUser(String(uid));
   if (!sock?.profilePictureUrl) return null;
   try { return await sock.profilePictureUrl(jid, "preview"); } catch { return null; }
 }
