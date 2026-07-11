@@ -1,1 +1,20 @@
-[]
+[
+  {
+    "id": "e4dc5be5-2f5c-4db7-b615-c3ab6a23f1e2",
+    "name": "مجموعة 1 + حالات قرانيه الطريق الى الجنه → مجموعة 1",
+    "ownerUid": "7428421245",
+    "sources": [
+      "g1@g.us",
+      "120363408132904155@newsletter"
+    ],
+    "destination": "g1@g.us",
+    "sourceNumber": "+249114375739",
+    "blockLinks": true,
+    "blockImages": false,
+    "blockVideos": false,
+    "blockAudios": false,
+    "noForward": true,
+    "enabled": true,
+    "createdAt": "2026-07-11T17:19:30.723Z"
+  }
+]

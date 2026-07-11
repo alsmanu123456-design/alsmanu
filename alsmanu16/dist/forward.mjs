@@ -182,7 +182,7 @@ function setUserGroups(uid, groups) {
   uid = String(uid);
   const chats = loadChats();
   chats.groups = chats.groups.filter((g) => String(g.ownerUid) !== uid);
-  for (const g of groups) chats.groups.push({ id: g.id, name: g.name, ownerUid: uid });
+  for (const g of groups) chats.groups.push({ id: g.id, name: g.name, members: g.members || 0, ownerUid: uid });
   saveChats(chats);
 }
 
@@ -193,17 +193,39 @@ function ss(uid, data) { SESSION.set(uid, { ...gs(uid), ...data }); }
 function cs(uid) { SESSION.delete(uid); }
 
 // ─── جلب المجموعات من واتساب ──────────────────────────────────────
-async function fetchGroups(sockOverride) {
-  // [USER-ISOLATION] لا fallback لجلسة مستخدم آخر — السوكت يجب أن يُمرَّر صراحةً
+// [GROUPS-PROVIDER] مزوّد يُحقن من index.mjs — نفس دالة قسم المجموعات الشغّالة
+// (كاش inMemoryDB.groupsCache + 3 محاولات) فيعيد أسماء حقيقية وعدد الأعضاء
+let _groupsProvider = null;
+export function setForwardGroupsProvider(fn) { _groupsProvider = fn; }
+
+function _mapGroup(g) {
+  return {
+    id: g.id,
+    name: (g.subject && String(g.subject).trim()) || (g.name && String(g.name).trim()) || g.id,
+    members: g.participants?.length || g.size || 0,
+  };
+}
+
+async function fetchGroups(sockOverride, uid, force) {
+  // 1) الطريقة المُثبتة: مزوّد قسم المجموعات (كاش + إعادة محاولات)
+  if (uid && _groupsProvider) {
+    try {
+      const raw = await _groupsProvider(String(uid), !!force);
+      if (Array.isArray(raw) && raw.length > 0) return raw.map(_mapGroup);
+    } catch {}
+  }
+  // 2) احتياطي: جلب مباشر عبر السوكت المُمرَّر (مع إعادة محاولات)
   const sock = sockOverride;
   if (!sock) return [];
-  try {
-    const groups = await sock.groupFetchAllParticipating();
-    return Object.values(groups).map((g) => ({
-      id: g.id,
-      name: (g.subject && g.subject.trim()) || ("مجموعة " + g.id.split("@")[0].slice(-6)),
-    }));
-  } catch { return []; }
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const groups = await sock.groupFetchAllParticipating();
+      const list = Object.values(groups || {});
+      if (list.length > 0) return list.map(_mapGroup);
+    } catch {}
+    if (attempt < 3) await new Promise((r) => setTimeout(r, attempt * 1500));
+  }
+  return [];
 }
 
 // ─── مساعد: جلب اسم القناة من صفحتها على الويب (fallback بدون sock) ─
@@ -330,7 +352,7 @@ function hasLinks(text) {
   return /https?:\/\/|www\.|bit\.ly\/|t\.me\//i.test(text || "");
 }
 
-// ─── استخراج نص الرسالة ────────────────────────────────────────────
+// ─── استخراج نص الرسالة ─────────────────���──────────────────────────
 function extractMsgText(msg) {
   const m = msg.message;
   if (!m) return "";
@@ -349,7 +371,7 @@ function extractMsgText(msg) {
 // ═══════════════════════════════════════════════════════════════════
 export async function applyForwardRules(sock, msg) {
   try {
-    // [PIPELINE-FIX] O(1) من الكاش — لا disk read لكل رسالة
+    // [PIPELINE-FIX] O(1) من الكاش ��� لا disk read لكل رسالة
     const rules = _cacheGetRules().filter((r) => r.enabled);
     const fromJid = msg.key?.remoteJid;
     const isNewsletter = fromJid?.endsWith("@newsletter");
@@ -499,7 +521,7 @@ export function autoDetectSource(_msg) {
   return;
 }
 
-// ═══════════════════════════════════════════════════════════════════
+// ═══════════��═════════��═════════════════════════════════════════════
 // مكوّنات لوحة المفاتيح
 // ═══════════════════════════════════════════════════════════════════
 const PAGE = 9;
@@ -515,7 +537,7 @@ function _webappButton(uid) {
     return [{ text: "🌐 إدارة التحويلات (WebApp)", web_app: { url } }];
   }
   if (url) {
-    return [{ text: "🌐 إدارة التحويلات (WebApp)", url }];
+    return [{ text: "🌐 إدارة التح��يلات (WebApp)", url }];
   }
   // لا يوجد رابط عام — زر يشرح الرابط المحلي
   return [{ text: "🌐 إدارة التحويلات (WebApp)", callback_data: "fw_webapp" }];
@@ -677,10 +699,10 @@ export async function handleForwardCallback(query) {
   };
   const send = (txt, kb) => _bot.sendMessage(chatId, txt, { reply_markup: kb, parse_mode: "Markdown" }).catch(() => {});
 
-  // ── القائمة الرئيسية ──────────────────────────────────────────
+  // ── القائمة الرئيسية ─────────────────��────────────────────────
   if (data === "fw_menu") {
     ans();
-    await edit("📡 *قسم التحويل*\n\nأنشئ قواعد لتوجيه الرسائل بين القنوات والمجموعات تلقائياً.\nتحويل شامل: قناة→مجموعة، مجموعة→مجموعة، مجموعة→شخص...", fwMenuKb(uid, userRules(uid).length));
+    await edit("📡 *قسم التحويل*\n\nأنشئ قواعد لتوجيه الرسائل بين ال��نوات والمجموعات تلقائياً.\nتحويل شامل: قناة→مجموعة، مجموعة→مجموعة، مجموعة→شخص...", fwMenuKb(uid, userRules(uid).length));
     return true;
   }
 
@@ -737,7 +759,7 @@ export async function handleForwardCallback(query) {
       return true;
     }
     ans("🔄 جاري جلب المجموعات...");
-    const groups = await fetchGroups(sock);
+    const groups = await fetchGroups(sock, uid, true);
     setUserGroups(uid, groups);
     await edit(`✅ *تم تحديث المجموعات*\n\n📊 عدد المجموعات: ${groups.length}`, chMgrKb());
     return true;
@@ -814,7 +836,7 @@ export async function handleForwardCallback(query) {
     return true;
   }
 
-  // ── تنزيل بروفايل القناة ──────────────────────────────────────
+  // ── ت��زيل بروفايل القناة ──────────────────────────────────────
   if (data === "fw_chpic") {
     ans("⏳ جاري تنزيل البروفايل الكامل...");
     const result = gs(uid).chSearchResult;
@@ -876,7 +898,7 @@ export async function handleForwardCallback(query) {
     const total = Math.max(1, Math.ceil(items.length / PAGE));
     const pSafe = Math.min(Math.max(0, p), total - 1);
     const slice = items.slice(pSafe * PAGE, (pSafe + 1) * PAGE);
-    const rows = slice.map((g) => [{ text: String(g?.name || g?.subject || g?.id || "مجموعة بدون اسم").slice(0, 40), callback_data: "noop" }]);
+    const rows = slice.map((g) => [{ text: "👥 " + String(g?.name || g?.subject || g?.id || "مجموعة بدون اسم").slice(0, 36) + (g?.members ? ` (${g.members})` : ""), callback_data: "noop" }]);
     const nav = [];
     if (pSafe > 0) nav.push({ text: "◀️ السابق", callback_data: "fw_grl_p" + (pSafe - 1) });
     nav.push({ text: `📄 ${pSafe + 1}/${total}`, callback_data: "noop" });
@@ -918,7 +940,7 @@ export async function handleForwardCallback(query) {
     if (!fwNumber) { ans("⚠️ اختر رقم واتساب أولاً"); return true; }
     let items = isCh ? userChannels(uid) : userGroups(uid);
     if (!isCh && !items.length) {
-      const fetched = await fetchGroups(_sockForNumber(fwNumber));
+      const fetched = await fetchGroups(_sockForNumber(fwNumber), uid);
       if (fetched.length) { setUserGroups(uid, fetched); items = fetched; }
     }
     ss(uid, { srcType: isCh ? "ch" : "gr", srcPage: 0, srcItems: items });
@@ -944,7 +966,7 @@ export async function handleForwardCallback(query) {
     return true;
   }
 
-  // ── Toggle مصدر ─────────────────────────────────────────────
+  // ── Toggle مصدر ──────────────────────────────────────────��──
   if (data.startsWith("fw_sch_t") || data.startsWith("fw_sgr_t")) {
     ans();
     const isCh = data.startsWith("fw_sch_t");
@@ -965,7 +987,7 @@ export async function handleForwardCallback(query) {
       }
     }
     const prefix = isCh ? "fw_sch_" : "fw_sgr_";
-    const title = isCh ? "📺 اختر القنوات المصدر" : "👥 اختر المجموعات المصدر";
+    const title = isCh ? "📺 اختر القنوا�� المصدر" : "👥 اختر المجموعات المصدر";
     await edit(`*${title}*\n\n_يمكنك اختيار أكثر من واحدة._`, chatListKb(items, s.srcPage || 0, prefix, sources, true, "fw_add"));
     return true;
   }
@@ -977,7 +999,7 @@ export async function handleForwardCallback(query) {
     const numSock = _sockForNumber(gs(uid).fwNumber) || _sockForUser(uid);
     if (!numSock) { ans("⚠️ واتساب غير متصل — اربط الرقم أولاً"); return true; }
     ans("🔄 جاري التحديث...");
-    const items = await fetchGroups(numSock);
+    const items = await fetchGroups(numSock, uid, true);
     setUserGroups(uid, items);
     ss(uid, { srcItems: items, srcPage: 0 });
     const prefix = isCh ? "fw_sch_" : "fw_sgr_";
@@ -1007,7 +1029,7 @@ export async function handleForwardCallback(query) {
     }
     let items = userGroups(uid);
     if (!items.length) {
-      items = await fetchGroups(_sockForNumber(s.fwNumber) || _sockForUser(uid));
+      items = await fetchGroups(_sockForNumber(s.fwNumber) || _sockForUser(uid), uid);
       if (items.length) setUserGroups(uid, items);
     }
     ss(uid, { step: "dst_type", dstType: "gr", dstItems: items, dstPage: 0 });
@@ -1030,7 +1052,7 @@ export async function handleForwardCallback(query) {
     const isCh = data === "fw_dst_ch";
     let items = isCh ? userChannels(uid) : userGroups(uid);
     if (!items.length && !isCh) {
-      items = await fetchGroups(_sockForNumber(gs(uid).fwNumber) || _sockForUser(uid));
+      items = await fetchGroups(_sockForNumber(gs(uid).fwNumber) || _sockForUser(uid), uid);
       if (items.length) setUserGroups(uid, items);
     }
     ss(uid, { dstType: isCh ? "ch" : "gr", dstItems: items, dstPage: 0 });
@@ -1082,7 +1104,7 @@ export async function handleForwardCallback(query) {
     const numSock = _sockForNumber(gs(uid).fwNumber) || _sockForUser(uid);
     if (!numSock) { ans("⚠️ واتساب غير مت��ل — اربط الرقم أولاً"); return true; }
     ans("🔄 جاري التحديث...");
-    const items = await fetchGroups(numSock);
+    const items = await fetchGroups(numSock, uid, true);
     setUserGroups(uid, items);
     ss(uid, { dstItems: items, dstPage: 0 });
     const prefix = isCh ? "fw_dch_" : "fw_dgr_";
@@ -1091,7 +1113,7 @@ export async function handleForwardCallback(query) {
     return true;
   }
 
-  // ── بحث وجهة ────────────────────────────────────────────────
+  // ── بحث وجهة ───────��────────────────────────────────────────
   if (data === "fw_dch_srch" || data === "fw_dgr_srch") {
     ans();
     const isCh = data === "fw_dch_srch";
@@ -1604,7 +1626,7 @@ export async function webPreviewChannel(uid, input) {
   }
   if (!id) throw new Error("تعذّر العثور على القناة — تأكد من الرابط واتصال واتساب");
 
-  // صورة عبر السوكت إن لم توجد
+  // صورة عبر السوكت إن ��م توجد
   if (!picture && sock?.profilePictureUrl) {
     try { picture = await sock.profilePictureUrl(id, "image"); }
     catch { try { picture = await sock.profilePictureUrl(id, "preview"); } catch {} }
@@ -1640,7 +1662,7 @@ export async function webRefreshGroups(uid, number) {
   uid = String(uid);
   const sock = (number && _socksByNumber.get(number)?.ownerUid === uid ? _socksByNumber.get(number).sock : null) || _sockForUser(uid);
   if (!sock) throw new Error("واتساب غير متصل — اربط رقمك أولاً");
-  const groups = await fetchGroups(sock);
+  const groups = await fetchGroups(sock, uid, true);
   setUserGroups(uid, groups);
   return { groups: userGroups(uid) };
 }
