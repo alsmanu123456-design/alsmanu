@@ -76,11 +76,22 @@ function _sockForNumber(phoneNumber) {
   const entry = phoneNumber ? _socksByNumber.get(phoneNumber) : null;
   return entry?.sock || null;
 }
+// [SESSION-RESOLVER] مُحلّل احتياطي يُحقن من index.mjs — يبحث في مخزن جلسات
+// البوت الرئيسي (inMemoryDB.sessions) بنفس طريقة بقية أقسام البوت.
+// هذا يضمن أن قسم التحويلات والـ WebApp يجدان الجلسة حتى لو لم يُسجَّل
+// السوكت في السجل المحلي (مثلاً بعد استعادة جلسة عند إعادة التشغيل).
+let _sessionResolver = null;
+export function setForwardSessionResolver(fn) { _sessionResolver = fn; }
+
 // أفضل سوكت متاح لمستخدم معيّن (أول رقم يملكه)
 function _sockForUser(uid) {
   uid = String(uid);
   for (const entry of _socksByNumber.values()) {
     if (entry.ownerUid === uid && entry.sock) return entry.sock;
+  }
+  // احتياطي: مخزن الجلسات الرئيسي للبوت (خاص بهذا المستخدم فقط)
+  if (_sessionResolver) {
+    try { return _sessionResolver(uid) || null; } catch { return null; }
   }
   return null;
 }
@@ -1287,8 +1298,8 @@ export async function handleForwardCallback(query) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// معالج الرسائل النصية (للبحث وإدخال الرقم)
-// ═══════════════════════════════════════════════════════════════════
+// معالج الرسائل ال��صية (للبحث وإدخال الرقم)
+// ═════════════════════════════════════════════════════════���═════════
 export async function handleForwardText(msg) {
   if (!_bot) return false;
   const chatId = msg.chat?.id;
@@ -1637,7 +1648,7 @@ export async function webRefreshGroups(uid, number) {
 export function webCreateRule(uid, payload) {
   uid = String(uid);
   const { sources, destination, sourceNumber, name } = payload || {};
-  if (!Array.isArray(sources) || !sources.length) throw new Error("اختر مصدراً واحداً على الأقل");
+  if (!Array.isArray(sources) || !sources.length) throw new Error("اختر مصدراً واحد��ً على الأقل");
   if (!destination) throw new Error("اختر وجهة");
   const allItems = [...userGroups(uid), ...userChannels(uid)];
   const nm = (id) => allItems.find((x) => x.id === id)?.name || id.split("@")[0];
