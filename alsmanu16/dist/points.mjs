@@ -202,7 +202,7 @@ export async function handlePointsCallback(bot2, chatId, userId, data) {
     }
     const botName = BOT_USERNAME || "";
     const refLink = botName
-      ? `https://t.me/${botName}?start=${code}`
+      ? `https://t.me/${botName}?start=ref_${encodeURIComponent(code)}`
       : null;
 
     const refCount = user.referralCount || 0;
@@ -238,7 +238,7 @@ export async function handlePointsCallback(bot2, chatId, userId, data) {
 
     const kb = {
       inline_keyboard: [
-        refLink ? [{ text: "🔗 مشاركة الرابط", url: refLink }] : [],
+        refLink ? [{ text: "مشاركة رابط الدعوة", url: `https://t.me/share/url?url=${encodeURIComponent(refLink)}&text=${encodeURIComponent("انضم إلى البوت من رابط دعوتي")}` }] : [],
         [{ text: "📊 نقاطي", callback_data: "menu_points" }, { text: "🔙 رجوع", callback_data: "menu_points" }],
       ].filter(row => row.length > 0)
     };
@@ -320,7 +320,7 @@ async function handleFeatureBuy(bot2, chatId, userId, data, user) {
   }
   await bot2.sendMessage(
     chatId,
-    `✅ *تأكيد الترقية*\n\nالفئة: ${TIER_NAMES[tier]}\nالتكلفة: ${cost.toLocaleString()} نقطة\nرصيدك بعد الشراء: ${((user.points || 0) - cost).toLocaleString()} نقطة\n\nهل تأكد؟`,
+    `✅ *تأكيد الترقية*\n\nالفئة: ${TIER_NAMES[tier]}\nالتكلفة: ${cost.toLocaleString()} نقطة\nرصيدك بعد ا��شراء: ${((user.points || 0) - cost).toLocaleString()} نقطة\n\nهل تأكد؟`,
     { parse_mode: "Markdown", reply_markup: confirmKeyboard(`confirm_buy_${tier}`, "cancel") }
   );
 }

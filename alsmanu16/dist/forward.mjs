@@ -48,14 +48,23 @@ export function registerForwardSock(phoneNumber, sock, ownerUid) {
     ownerUid: ownerUid != null ? String(ownerUid) : (prev?.ownerUid || null),
   });
 }
-export function unregisterForwardSock(phoneNumber) {
+export function unregisterForwardSock(phoneNumber, ownerUid) {
   if (!phoneNumber) return;
   const entry = _socksByNumber.get(phoneNumber);
+  if (ownerUid != null && entry?.ownerUid && entry.ownerUid !== String(ownerUid)) return;
   _socksByNumber.delete(phoneNumber);
   if (entry?.sock && entry.sock === _sock) {
     const next = _socksByNumber.values().next().value;
     _sock = next ? next.sock : null;
   }
+}
+
+function _normalizePhone(value) {
+  return String(value || "").replace(/[^0-9]/g, "");
+}
+function _samePhone(a, b) {
+  const x = _normalizePhone(a), y = _normalizePhone(b);
+  return !!x && !!y && x === y;
 }
 // [FIX-PER-USER] مع uid: أرقام هذا المستخدم فقط. بدون uid: الكل (توافق عكسي)
 export function getConnectedForwardNumbers(uid) {
@@ -157,9 +166,12 @@ export function userChannels(uid) {
   uid = String(uid);
   return loadChats().channels.filter((c) => String(c.ownerUid) === uid);
 }
-export function userGroups(uid) {
+export function userGroups(uid, phoneNumber = null) {
   uid = String(uid);
-  return loadChats().groups.filter((g) => String(g.ownerUid) === uid);
+  return loadChats().groups.filter((g) =>
+    String(g.ownerUid) === uid &&
+    (phoneNumber == null || _samePhone(g.phoneNumber, phoneNumber))
+  );
 }
 function addUserChannel(uid, ch) {
   uid = String(uid);
@@ -178,12 +190,51 @@ function removeUserChannel(uid, chId) {
   saveChats(chats);
   return true;
 }
-function setUserGroups(uid, groups) {
+function setUserGroups(uid, groups, phoneNumber) {
   uid = String(uid);
+  const phone = _normalizePhone(phoneNumber);
+  if (!phone) throw new Error("تعذّر تحديد رقم واتساب المرتبط بهذه المجموعات");
   const chats = loadChats();
-  chats.groups = chats.groups.filter((g) => String(g.ownerUid) !== uid);
-  for (const g of groups) chats.groups.push({ id: g.id, name: g.name, members: g.members || 0, ownerUid: uid });
+  chats.groups = chats.groups.filter((g) =>
+    !(String(g.ownerUid) === uid && _samePhone(g.phoneNumber, phone))
+  );
+  for (const g of groups) chats.groups.push({
+    id: g.id,
+    name: g.name,
+    members: g.members || 0,
+    ownerUid: uid,
+    phoneNumber: phone,
+  });
   saveChats(chats);
+}
+
+export function purgeForwardNumber(uid, phoneNumber) {
+  uid = String(uid);
+  const phone = _normalizePhone(phoneNumber);
+  if (!phone) return { groups: 0, channels: 0, rules: 0 };
+  const chats = loadChats();
+  const beforeGroups = chats.groups.length;
+  const beforeChannels = chats.channels.length;
+  chats.groups = chats.groups.filter((g) =>
+    !(String(g.ownerUid) === uid && _samePhone(g.phoneNumber, phone))
+  );
+  chats.channels = chats.channels.filter((c) =>
+    !(String(c.ownerUid) === uid && _samePhone(c.phoneNumber, phone))
+  );
+  saveChats(chats);
+  const rules = loadRules();
+  const kept = rules.filter((r) =>
+    !(String(r.ownerUid) === uid && _samePhone(r.sourceNumber, phone))
+  );
+  saveRules(kept);
+  unregisterForwardSock(phoneNumber, uid);
+  const state = gs(uid);
+  if (_samePhone(state.fwNumber, phone)) cs(uid);
+  return {
+    groups: beforeGroups - chats.groups.length,
+    channels: beforeChannels - chats.channels.length,
+    rules: rules.length - kept.length,
+  };
 }
 
 // ─── حالة الجلسة (في الذاكرة) ──────────────────────────────────────
@@ -521,7 +572,7 @@ export function autoDetectSource(_msg) {
   return;
 }
 
-// ═══════════��═════════��═════════════════════════════════════════════
+// ═══════════���═════════��═════════════════════════════════════════════
 // مكوّنات لوحة المفاتيح
 // ═══════════════════════════════════════════════════════════════════
 const PAGE = 9;
@@ -678,7 +729,7 @@ function _listItems(uid, isCh, sessKey) {
 
 // ═══════════════════════════════════════════════════════════════════
 // معالج callbacks التيليجرام
-// ═══════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════��
 export async function handleForwardCallback(query) {
   if (!_bot) return false;
   const data = (query.data || "").trim();
@@ -966,7 +1017,7 @@ export async function handleForwardCallback(query) {
     return true;
   }
 
-  // ── Toggle مصدر ──────────────────────────────────────────��──
+  // ── Toggle مصدر ───────────────────────��──────────────────��──
   if (data.startsWith("fw_sch_t") || data.startsWith("fw_sgr_t")) {
     ans();
     const isCh = data.startsWith("fw_sch_t");
@@ -1581,12 +1632,17 @@ export function isForwardSession(uid) {
 // ═══════════════════════════════════════════════════════════════════
 export function webGetOverview(uid) {
   uid = String(uid);
+  const numbers = getConnectedForwardNumbers(uid);
+  const owned = new Set(numbers.map(_normalizePhone));
+  const groups = userGroups(uid).filter((g) => owned.has(_normalizePhone(g.phoneNumber)));
+  const channels = userChannels(uid).filter((c) => !c.phoneNumber || owned.has(_normalizePhone(c.phoneNumber)));
+  const rules = userRules(uid).filter((r) => !r.sourceNumber || owned.has(_normalizePhone(r.sourceNumber)));
   return {
-    numbers: getConnectedForwardNumbers(uid),
-    channels: userChannels(uid),
-    groups: userGroups(uid),
-    rules: userRules(uid),
-    waConnected: !!_sockForUser(uid),
+    numbers,
+    channels,
+    groups,
+    rules,
+    waConnected: numbers.length > 0 && !!_sockForUser(uid),
   };
 }
 
@@ -1624,7 +1680,7 @@ export async function webPreviewChannel(uid, input) {
       if (!picture && web.image) picture = web.image;
     }
   }
-  if (!id) throw new Error("تعذّر العثور على القناة — تأكد من الرابط واتصال واتساب");
+  if (!id) throw new Error("تعذّر العثور على الق��اة — تأكد من الرابط واتصال واتساب");
 
   // صورة عبر السوكت إن ��م توجد
   if (!picture && sock?.profilePictureUrl) {
@@ -1646,8 +1702,13 @@ export async function webPreviewChannel(uid, input) {
 export function webAddChannel(uid, ch) {
   uid = String(uid);
   if (!ch?.id) throw new Error("بيانات قناة ناقصة");
-  const added = addUserChannel(uid, { id: ch.id, name: ch.name || ch.id });
-  const sock = _sockForUser(uid);
+  const numbers = getConnectedForwardNumbers(uid);
+  const phoneNumber = ch.phoneNumber || numbers[0];
+  if (!phoneNumber || !numbers.some((n) => _samePhone(n, phoneNumber))) {
+    throw new Error("اختر رقم واتساب تابعاً لك");
+  }
+  const added = addUserChannel(uid, { id: ch.id, name: ch.name || ch.id, phoneNumber: _normalizePhone(phoneNumber) });
+  const sock = _sockForNumber(phoneNumber);
   if (ch.id.endsWith("@newsletter") && sock?.subscribeNewsletterUpdates) {
     sock.subscribeNewsletterUpdates(ch.id).catch(() => {});
   }
@@ -1660,11 +1721,17 @@ export function webDeleteChannel(uid, chId) {
 
 export async function webRefreshGroups(uid, number) {
   uid = String(uid);
-  const sock = (number && _socksByNumber.get(number)?.ownerUid === uid ? _socksByNumber.get(number).sock : null) || _sockForUser(uid);
+  const numbers = getConnectedForwardNumbers(uid);
+  const selected = number || numbers[0];
+  if (!selected || !numbers.some((n) => _samePhone(n, selected))) {
+    throw new Error("رقم واتساب غير تابع لك أو غير متصل");
+  }
+  const entry = [..._socksByNumber.entries()].find(([phone, e]) => _samePhone(phone, selected) && e.ownerUid === uid)?.[1];
+  const sock = entry?.sock;
   if (!sock) throw new Error("واتساب غير متصل — اربط رقمك أولاً");
   const groups = await fetchGroups(sock, uid, true);
-  setUserGroups(uid, groups);
-  return { groups: userGroups(uid) };
+  setUserGroups(uid, groups, selected);
+  return { groups: userGroups(uid, selected) };
 }
 
 export function webCreateRule(uid, payload) {
@@ -1672,7 +1739,11 @@ export function webCreateRule(uid, payload) {
   const { sources, destination, sourceNumber, name } = payload || {};
   if (!Array.isArray(sources) || !sources.length) throw new Error("اختر مصدراً واحد��ً على الأقل");
   if (!destination) throw new Error("اختر وجهة");
-  const allItems = [...userGroups(uid), ...userChannels(uid)];
+  const numbers = getConnectedForwardNumbers(uid);
+  if (!sourceNumber || !numbers.some((n) => _samePhone(n, sourceNumber))) throw new Error("اختر رقم واتساب تابعاً لك");
+  const allItems = [...userGroups(uid, sourceNumber), ...userChannels(uid).filter((c) => !c.phoneNumber || _samePhone(c.phoneNumber, sourceNumber))];
+  const allowedIds = new Set(allItems.map((x) => x.id));
+  if (sources.some((id) => !allowedIds.has(id)) || !allowedIds.has(destination)) throw new Error("تم رفض مجموعة أو قناة لا تخص رقمك");
   const nm = (id) => allItems.find((x) => x.id === id)?.name || id.split("@")[0];
   const rule = {
     id: randomUUID(),
