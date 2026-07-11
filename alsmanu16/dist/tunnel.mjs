@@ -82,8 +82,11 @@ function _tryCloudflare(port, log, timeoutMs = 30000) {
     ], { stdio: ["ignore", "pipe", "pipe"] });
 
     const finish = (val) => { if (!resolved) { resolved = true; resolve(val); } };
+    // المهلة تنهي المحاولة دائماً — حتى لو التُقط الرابط بدون تسجيل اتصال فعلي
+    // (يحدث عندما تحجب الاستضافة منفذ 7844 الخاص بكلاودفلير)
     const timer = setTimeout(() => {
-      if (!gotUrl) { try { _cfProc?.kill(); } catch {} finish(null); }
+      try { _cfProc?.kill(); } catch {}
+      finish(null);
     }, timeoutMs);
 
     const onData = (buf) => {
@@ -106,6 +109,51 @@ function _tryCloudflare(port, log, timeoutMs = 30000) {
     _cfProc.on("exit", () => { if (!resolved) { clearTimeout(timer); finish(null); } });
     _cfProc.on("error", () => { clearTimeout(timer); finish(null); });
   });
+}
+
+// ─── المزود الأول: tunnelmole (يعمل عبر WSS منفذ 443 — الأكثر توافقاً) ──
+let _tmProc = null;
+async function _tryTunnelmole(port, log) {
+  // 1) كمكتبة مثبتة (الأسرع)
+  try {
+    const mod = await import("tunnelmole");
+    const tm = mod.tunnelmole || mod.default;
+    if (typeof tm === "function") {
+      const url = await Promise.race([
+        tm({ port }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 45000)),
+      ]);
+      if (url) return String(url).replace(/^http:/, "https:");
+    }
+  } catch {}
+  // 2) عبر npx (لا يتطلب تثبيتاً مسبقاً — فقط Node + npm)
+  try {
+    return await new Promise((resolve) => {
+      const p = spawn("npx", ["-y", "tunnelmole", String(port)], {
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, NODE_OPTIONS: "" },
+      });
+      let done = false;
+      const finish = (v, keep) => {
+        if (done) return;
+        done = true;
+        if (!keep) { try { p.kill(); } catch {} }
+        resolve(v);
+      };
+      const timer = setTimeout(() => finish(null, false), 90000);
+      const onData = (b) => {
+        const m = b.toString().match(/https:\/\/[a-z0-9-]+(?:-ip-[0-9-]+)?\.tunnelmole\.net/);
+        if (m) { clearTimeout(timer); _tmProc = p; finish(m[0], true); }
+      };
+      p.stdout.on("data", onData);
+      p.stderr.on("data", onData);
+      p.on("exit", () => { clearTimeout(timer); finish(null, false); });
+      p.on("error", () => { clearTimeout(timer); finish(null, false); });
+    });
+  } catch (e) {
+    log(`[TUNNEL] فشل tunnelmole: ${e?.message}`);
+    return null;
+  }
 }
 
 // ─── المزود الاحتياطي: localtunnel (بروتوكول مبني ببايثات Node فقط) ──
@@ -162,8 +210,22 @@ export async function startTunnel(port, logger, onUrl) {
       return envUrl;
     }
 
-    // 1) Cloudflare أولاً (بدون صفحة وسيطة — الأفضل لتيليجرام)
-    log(`[TUNNEL] محاولة إنشاء رابط عام عبر Cloudflare...`);
+    // 1) tunnelmole أولاً — يعمل عبر WSS على منفذ 443 (يمر من أي جدار حماية)
+    //    بدون صفحة وسيطة وبدون كلمة مرور — مثالي لزر Telegram WebApp
+    log(`[TUNNEL] محاولة إنشاء رابط عام عبر tunnelmole...`);
+    const tmUrl = await _tryTunnelmole(port, log);
+    if (tmUrl) {
+      _setUrl(tmUrl, "tunnelmole", log, onUrl);
+      _tmProc?.on("exit", () => {
+        _url = null; globalThis.__FW_PUBLIC_URL = null; _starting = false;
+        log("[TUNNEL] النفق أُغلق — إعادة تشغيل خلال 5 ثوانٍ...");
+        setTimeout(() => startTunnel(port, logger, onUrl), 5000);
+      });
+      return tmUrl;
+    }
+
+    // 2) Cloudflare (بدون صفحة وسيطة — يتطلب منفذ 7844 صادراً)
+    log(`[TUNNEL] tunnelmole غير متاح — محاولة Cloudflare...`);
     const cfUrl = await _tryCloudflare(port, log);
     if (cfUrl) {
       _setUrl(cfUrl, "cloudflare", log, onUrl);
@@ -176,7 +238,7 @@ export async function startTunnel(port, logger, onUrl) {
       return cfUrl;
     }
 
-    // 2) الاحتياطي: localtunnel (يعمل حتى لو حُجب منفذ 7844)
+    // 3) الاحتياطي الأخير: localtunnel
     log(`[TUNNEL] Cloudflare محجوب على هذه الاستضافة — التحويل إلى localtunnel...`);
     const ltUrl = await _tryLocaltunnel(port, log);
     if (ltUrl) {
