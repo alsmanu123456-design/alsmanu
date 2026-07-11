@@ -6,3 +6,4 @@ config.json
 bot-data/
 .env
 bin/yt-dlp
+data/webapp-tokens.json
