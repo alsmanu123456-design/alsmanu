@@ -16,7 +16,7 @@ import {
   initRulesCache,
 } from "../engine/rules-cache.mjs";
 
-import { webappUrlFor, webappLocalUrlFor } from "./webapp-auth.mjs";
+import { webappUrlFor } from "./webapp-auth.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, "..", "data");
@@ -671,17 +671,37 @@ export async function handleForwardCallback(query) {
     return true;
   }
 
-  // ── WebApp (لا يوجد رابط عام مكتشَف) ─────────────────────────
+  // ── WebApp (الرابط العام قيد الإنشاء عبر النفق التلقائي) ─────
   if (data === "fw_webapp") {
-    ans();
-    const localUrl = webappLocalUrlFor(uid);
+    // البوت ينشئ رابطاً عاماً بنفسه عبر النفق — قد يستغرق ثوانٍ عند أول تشغيل
+    const readyUrl = webappUrlFor(uid);
+    if (readyUrl && readyUrl.startsWith("https://")) {
+      ans("✅ الرابط جاهز");
+      let note = "";
+      try {
+        const t = await import("./tunnel.mjs");
+        if (t.tunnelProvider?.() === "localtunnel" && t.tunnelPassword?.()) {
+          note = "\n\n⚠️ عند أول فتح قد تظهر صفحة تطلب كلمة مرور — أدخل:\n`" + t.tunnelPassword() + "`\n(تُدخل مرة واحدة فقط)";
+        }
+      } catch {}
+      await edit(
+        "🌐 *إدارة التحويلات عبر الويب*\n\nالرابط جاهز! اضغط الزر بالأسفل لفتح لوحة الإدارة." + note + "\n\n_رابطك خاص بك — لا تشاركه مع أحد._",
+        { inline_keyboard: [
+          [{ text: "🌐 فتح لوحة الإدارة", web_app: { url: readyUrl } }],
+          backHome("fw_menu"),
+        ] }
+      );
+      return true;
+    }
+    ans("⏳ جاري إنشاء الرابط...");
     await edit(
-      "🌐 *إدارة التحويلات عبر الويب*\n\n" +
-      "لم يتم اكتشاف رابط عام للاستضافة تلقائياً.\n\n" +
-      "• إن كانت الاستضافة توفّر رابطاً عاماً، أضف متغير البيئة `WEBAPP_URL` بقيمة الرابط وأعد التشغيل.\n" +
-      "• للتجربة المحلية افتح:\n`" + localUrl + "`\n\n" +
-      "_رابطك خاص بك — لا تشاركه مع أحد._",
-      { inline_keyboard: [backHome("fw_menu")] }
+      "⏳ *جاري إنشاء الرابط العام...*\n\n" +
+      "البوت ينشئ رابطاً عاماً تلقائياً (يستغرق 10-30 ثانية عند أول تشغيل).\n\n" +
+      "اضغط الزر بالأسفل بعد لحظات للتحقق مجدداً.",
+      { inline_keyboard: [
+        [{ text: "🔄 تحقق مجدداً", callback_data: "fw_webapp" }],
+        backHome("fw_menu"),
+      ] }
     );
     return true;
   }
@@ -962,7 +982,7 @@ export async function handleForwardCallback(query) {
     return true;
   }
 
-  // ── تأكيد اختيار المصادر ─────────────────────────────────────
+  // ── تأكيد اختيار المصادر ────────────────────────────────���────
   if (data === "fw_sch_ok" || data === "fw_sgr_ok") {
     ans();
     const s = gs(uid);
@@ -1047,7 +1067,7 @@ export async function handleForwardCallback(query) {
     const isCh = data === "fw_dch_ref";
     if (isCh) { ans("ℹ️ أضف القنوات من قسم إدارة القنوات أو الويب آب"); return true; }
     const numSock = _sockForNumber(gs(uid).fwNumber) || _sockForUser(uid);
-    if (!numSock) { ans("⚠️ واتساب غير متصل — اربط الرقم أولاً"); return true; }
+    if (!numSock) { ans("⚠️ واتساب غير مت��ل — اربط الرقم أولاً"); return true; }
     ans("🔄 جاري التحديث...");
     const items = await fetchGroups(numSock);
     setUserGroups(uid, items);

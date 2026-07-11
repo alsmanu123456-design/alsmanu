@@ -38,6 +38,7 @@ export function userForToken(token) {
 }
 
 // اكتشاف رابط الاستضافة تلقائياً من متغيرات البيئة الشائعة — بدون أي إعداد خارجي
+// وإن لم يوجد: يُستخدم رابط النفق التلقائي (tunnel.mjs) الذي ينشئه البوت بنفسه
 export function webappBaseUrl() {
   const env = process.env;
   let url =
@@ -50,6 +51,7 @@ export function webappBaseUrl() {
     (env.FLY_APP_NAME ? `https://${env.FLY_APP_NAME}.fly.dev` : null) ||
     (env.VERCEL_URL ? `https://${env.VERCEL_URL}` : null) ||
     (env.HEROKU_APP_NAME ? `https://${env.HEROKU_APP_NAME}.herokuapp.com` : null) ||
+    globalThis.__FW_PUBLIC_URL || // رابط النفق التلقائي المنشأ من البوت
     null;
   if (url) {
     url = String(url).trim().replace(/\/+$/, "");
