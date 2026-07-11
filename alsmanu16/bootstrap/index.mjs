@@ -1,84 +1,135 @@
+#!/usr/bin/env node
 /**
- * bootstrap/index.mjs
- * ────────────────────────────────────────────────────────────────
- * المسؤولية الوحيدة: تسلسل خطوات تشغيل البوت بالترتيب الصحيح.
- *
- * لا يحتوي على أي منطق تشغيل (business logic).
- * كل خطوة مُفوَّضة بالكامل إلى الطبقة المسؤولة عنها.
- *
- * التسلسل:
- *   1. [core/health]          — التحقق من النظام
- *   2. [core/config]          — تحميل الإعدادات
- *   3. [infrastructure/patch] — تطبيق تعديلات dist/
- *   4. [infrastructure/pkg]   — ضمان الحزم
- *   5. [infrastructure/bin]   — ضمان الثنائيات
- *   6. [infrastructure/proc]  — إطلاق البوت (مع إعادة التشغيل التلقائية)
- *   7. [engine]               — تشغيل Session Engine (مراقبة + إصلاح)
+ * مشغل آمن وثابت للبوت.
+ * يمنع تشغيل نسختين، لا يعيد التثبيت بلا داعٍ، وينظف مؤقتات البوت فقط.
  */
-
-import { dirname }         from "path";
-import { fileURLToPath }   from "url";
-
-import { banner }          from "../core/logger.mjs";
-import { runAllChecks }    from "../core/health.mjs";
+import { createHash } from "crypto";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "fs";
+import { dirname, join, resolve } from "path";
+import { fileURLToPath } from "url";
+import { banner, ok, wrn } from "../core/logger.mjs";
+import { runAllChecks } from "../core/health.mjs";
 import { loadConfig, applyDefaults } from "../core/config.mjs";
-import { runAll as runPatches }      from "../infrastructure/patch-manager.mjs";
-import { ensure as ensurePackages }  from "../infrastructure/package-manager.mjs";
+import { ensure as ensurePackages } from "../infrastructure/package-manager.mjs";
 import { ensureYtDlp, ensureFfmpegStatic } from "../infrastructure/binary-manager.mjs";
-import { spawnBot }                  from "../infrastructure/process-manager.mjs";
-import { startEngine }               from "../engine/index.mjs";
+import { spawnBot } from "../infrastructure/process-manager.mjs";
+import { startEngine } from "../engine/index.mjs";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const BASE_DIR  = dirname(__dirname); // alsmanu6/
-
-// ─── Entry ──────────────────────────────────────────────────────
-banner("WhatsApp Bot Pro v8.0 — Session Engine v2.0");
-
-// ─── 1. System Health ────────────────────────────────────────────
-runAllChecks({ minNode: 18, minRAM: 150 });
-
-// ─── 2. Configuration ────────────────────────────────────────────
-loadConfig(BASE_DIR);
-applyDefaults();
-
-// ─── 3. dist/ Patches ────────────────────────────────────────────
-runPatches(BASE_DIR);
-
-// ─── 4. npm Packages ─────────────────────────────────────────────
-await ensurePackages(BASE_DIR);
-
-// ─── 5. External Binaries ────────────────────────────────────────
-await ensureYtDlp(BASE_DIR);
-await ensureFfmpegStatic(BASE_DIR); // ينزّل ثنائي ffmpeg إن تخطاه مدير الحزم
-
-// ─── 6. Launch Bot ───────────────────────────────────────────────
-const port = parseInt(process.env.PORT ?? "5000");
-
-// let أولاً حتى تكون مُهيَّأة بـ null قبل استدعاء onSpawn
-// (spawnBot تستدعي launch() مباشرةً → onSpawn تُستدعى قبل اكتمال const)
+const BASE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const RUNTIME_DIR = join(BASE_DIR, ".runtime");
+const PID_FILE = join(RUNTIME_DIR, "bootstrap.pid");
+const DEPS_STAMP = join(RUNTIME_DIR, "dependencies.sha256");
+const TMP_DIRS = [join(BASE_DIR, "tmp"), join(BASE_DIR, "temp"), join(BASE_DIR, "downloads")];
 let runner = null;
-runner = spawnBot(BASE_DIR, {
-  autoRestart: true,
-  onSpawn: (child) => {
-    // أبلغ engine بالعملية الجديدة عند كل إعادة تشغيل
-    // runner?._engine: آمن للاستدعاء الأول (runner=null أو engine=null)
-    if (runner?._engine) runner._engine.setChildProcess(child);
-  },
+let engine = null;
+let shuttingDown = false;
+
+function isAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+function acquireLock() {
+  mkdirSync(RUNTIME_DIR, { recursive: true });
+  if (existsSync(PID_FILE)) {
+    const oldPid = Number(readFileSync(PID_FILE, "utf8").trim());
+    if (isAlive(oldPid)) throw new Error(`البوت يعمل مسبقاً (PID ${oldPid})`);
+    rmSync(PID_FILE, { force: true });
+  }
+  writeFileSync(PID_FILE, String(process.pid), { flag: "wx", mode: 0o600 });
+}
+
+function dependencyFingerprint() {
+  const hash = createHash("sha256");
+  for (const name of ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"]) {
+    const file = join(BASE_DIR, name);
+    if (existsSync(file)) hash.update(name).update(readFileSync(file));
+  }
+  return hash.digest("hex");
+}
+
+async function ensureDependenciesOnce() {
+  const fingerprint = dependencyFingerprint();
+  const previous = existsSync(DEPS_STAMP) ? readFileSync(DEPS_STAMP, "utf8").trim() : "";
+  const modulesReady = existsSync(join(BASE_DIR, "node_modules", "node-telegram-bot-api"));
+  if (modulesReady && previous === fingerprint) {
+    ok("التبعيات ثابتة — لا حاجة لإعادة التثبيت");
+    return;
+  }
+  await ensurePackages(BASE_DIR);
+  if (existsSync(join(BASE_DIR, "node_modules"))) writeFileSync(DEPS_STAMP, fingerprint, { mode: 0o600 });
+}
+
+function cleanBotTemp() {
+  let removed = 0;
+  const maxAge = 24 * 60 * 60 * 1000;
+  const now = Date.now();
+  for (const dir of TMP_DIRS) {
+    if (!existsSync(dir)) continue;
+    for (const name of readdirSync(dir)) {
+      const target = join(dir, name);
+      try {
+        if (now - statSync(target).mtimeMs >= maxAge) {
+          rmSync(target, { recursive: true, force: true });
+          removed++;
+        }
+      } catch {}
+    }
+  }
+  if (removed) ok(`حُذفت ${removed} من مخلفات البوت القديمة`);
+}
+
+async function shutdown(signal, code = 0) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  wrn(`إيقاف نظيف (${signal})`);
+  try { await engine?.stop?.(); } catch {}
+  try { runner?.stop?.(); } catch {}
+  rmSync(PID_FILE, { force: true });
+  setTimeout(() => process.exit(code), 1_500).unref();
+}
+
+async function main() {
+  acquireLock();
+  process.once("SIGINT", () => shutdown("SIGINT"));
+  process.once("SIGTERM", () => shutdown("SIGTERM"));
+  process.once("uncaughtException", (error) => {
+    console.error(error);
+    shutdown("uncaughtException", 1);
+  });
+  process.once("unhandledRejection", (error) => {
+    console.error(error);
+    shutdown("unhandledRejection", 1);
+  });
+  process.once("exit", () => rmSync(PID_FILE, { force: true }));
+
+  banner("WhatsApp Bot Pro — Safe Bootstrap");
+  runAllChecks({ minNode: 18, minRAM: 150 });
+  loadConfig(BASE_DIR);
+  applyDefaults();
+  cleanBotTemp();
+  await ensureDependenciesOnce();
+  if (process.argv.includes("--check-only")) {
+    ok("فحص bootstrap اكتمل دون تشغيل البوت");
+    return;
+  }
+  await ensureYtDlp(BASE_DIR);
+  await ensureFfmpegStatic(BASE_DIR);
+
+  const port = Number.parseInt(process.env.PORT ?? "5000", 10);
+  runner = spawnBot(BASE_DIR, {
+    autoRestart: true,
+    onSpawn: (child) => engine?.setChildProcess?.(child),
+  });
+  await new Promise((resolveWait) => setTimeout(resolveWait, 8_000));
+  engine = await startEngine({ baseDir: BASE_DIR, childProcess: runner.getChild(), port }).catch((error) => {
+    wrn(`Session Engine لم يبدأ: ${error.message}`);
+    return null;
+  });
+}
+
+main().catch((error) => {
+  console.error(`فشل التشغيل: ${error.message}`);
+  rmSync(PID_FILE, { force: true });
+  process.exit(1);
 });
-
-// ─── 7. Session Engine ───────────────────────────────────────────
-// انتظر 8 ثوانٍ حتى يبدأ البوت ويُشغِّل Express على PORT
-await new Promise(r => setTimeout(r, 8_000));
-
-const engine = await startEngine({
-  baseDir:       BASE_DIR,
-  childProcess:  runner.getChild(),
-  port,
-}).catch(e => {
-  // فشل Engine لا يوقف البوت
-  console.error("⚠️  Session Engine لم يبدأ:", e.message);
-  return null;
-});
-
-// احفظ مرجع engine في runner حتى يصل إليه onSpawn
-runner._engine = engine;

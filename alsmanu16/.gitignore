@@ -7,3 +7,11 @@ bot-data/
 .env
 bin/yt-dlp
 data/webapp-tokens.json
+.runtime/
+.cache/
+tmp/
+temp/
+downloads/
+coverage/
+.nyc_output/
+logs/
