@@ -6,6 +6,16 @@ function escMd(s) {
   return String(s || "").replace(/([_*[\]`])/g, function(c){ return "\\" + c; });
 }
 
+let _telegramUsername = "";
+async function getTelegramUsername(bot) {
+  if (_telegramUsername) return _telegramUsername;
+  try {
+    const me = await bot.getMe();
+    _telegramUsername = String(me?.username || "").replace(/^@/, "");
+  } catch {}
+  return _telegramUsername;
+}
+
 // ── قسم النقاط المُطوَّر ────────────────────────────────────────────────────
 
 export async function showPoints2(bot2, chatId, userId, user) {
@@ -27,10 +37,10 @@ export async function showPoints2(bot2, chatId, userId, user) {
       _deps.saveUser(userId, { referralCode: refCode });
     }
   }
-  const botName = BOT_USERNAME || "";
+  const botName = await getTelegramUsername(bot2);
   const refLink = botName
-    ? `https://t.me/${botName}?start=${refCode}`
-    : `رمز الإحالة: \`${refCode}\``;
+    ? `https://t.me/${botName}?start=ref_${encodeURIComponent(refCode)}`
+    : null;
 
   // شريط التقدم البصري للنقاط
   const tiers = ["free","pro","promax","khariq","khariqpro","mizaj"];
@@ -154,7 +164,7 @@ export async function handlePointsCallback(bot2, chatId, userId, data) {
     return true;
   }
 
-  // ── كيف تكسب النقاط ──────────────────────────────────────────────────────
+  // ── كيف تكسب النقاط ────────────────────────────────────────────────���─────
   if (data === "points_earn") {
     await bot2.sendMessage(
       chatId,
@@ -200,7 +210,7 @@ export async function handlePointsCallback(bot2, chatId, userId, data) {
         _deps.saveUser(userId, { referralCode: code });
       }
     }
-    const botName = BOT_USERNAME || "";
+    const botName = await getTelegramUsername(bot2);
     const refLink = botName
       ? `https://t.me/${botName}?start=ref_${encodeURIComponent(code)}`
       : null;
@@ -232,8 +242,9 @@ export async function handlePointsCallback(bot2, chatId, userId, data) {
         `💬 شارك هذا الرابط مع أصدقائك وستحصل على النقاط تلقائياً عند تسجيلهم!`;
     } else {
       msgText +=
-        `📋 *رمز الإحالة:* \`${code}\`\n\n` +
-        `💬 شارك هذا الرمز مع أصدقائك وستحصل على +200 نقطة عند كل تسجيل!`;
+        `تعذر جلب اسم مستخدم البوت الحقيقي من Telegram الآن.\n` +
+        `أعد فتح القسم لاحقاً؛ لن نعرض رابطاً غير صالح.\n\n` +
+        `رمز الإحالة: \`${code}\``;
     }
 
     const kb = {

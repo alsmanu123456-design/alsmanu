@@ -32,14 +32,22 @@ export async function handleCallback(bot, query) {
   const chatId = query.message?.chat.id;
   const userId = String(query.from.id);
 
-  if (
-    data === 'menu_groups' ||
-    data.startsWith('grpv2_') ||
-    data.startsWith('grp_') ||
-    data.startsWith('groups_')
-  ) {
-    const handled = await _deps.handleGroupsCallback(bot, chatId, userId, data);
-    if (!handled) await _deps.handleGroupsV2(bot, chatId, userId, data);
+  if (data === 'menu_groups' || data.startsWith('grpv2_')) {
+    try {
+      await _deps.handleGroupsV2(bot, chatId, userId, data);
+    } catch (error) {
+      await bot.sendMessage(chatId, `تعذر فتح قسم المجموعات: ${error?.message || 'خطأ غير معروف'}`);
+    }
+    return true;
+  }
+
+  if (data.startsWith('grp_') || data.startsWith('groups_')) {
+    try {
+      const handled = await _deps.handleGroupsCallback(bot, chatId, userId, data);
+      if (!handled) await _deps.handleGroupsV2(bot, chatId, userId, data);
+    } catch (error) {
+      await bot.sendMessage(chatId, `تعذر تنفيذ عملية المجموعات: ${error?.message || 'خطأ غير معروف'}`);
+    }
     return true;
   }
 
